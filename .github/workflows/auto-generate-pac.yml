@@ -2,7 +2,7 @@ name: Auto Generate PAC File
 
 on:
   schedule:
-    - cron: '10 0 * * 4'
+    - cron: '10 0 * * 4'          # 每周四 UTC 00:10 = 北京时间 08:10
   push:
     paths:
       - 'gfw-pac.py'
@@ -17,20 +17,24 @@ jobs:
   update-gfw-pac:
     runs-on: ubuntu-latest
     permissions:
-      actions: write      # dispatch 下游需要
-      contents: write     # push 与后续 release 需要
+      contents: write             # 只需要读写仓库内容，不再需要 actions: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
 
-      - name: Check if gfw.pac is in the last commit
+      - name: Check if gfw.pac is already in this push
         id: check
+        env:
+          COMMITS_JSON: ${{ toJSON(github.event.commits) }}
         run: |
-          if git show --name-only --pretty=format: HEAD | grep -q '^gfw\.pac$'; then
-            echo "needed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "needed=true" >> "$GITHUB_OUTPUT"
+          needed=true
+          if [ "${{ github.event_name }}" = "push" ] && \
+             echo "$COMMITS_JSON" | grep -qE '"gfw\.pac"'; then
+            needed=false
           fi
+          echo "needed=${needed}" >> "$GITHUB_OUTPUT"
+          echo "本次是否需要重新生成：${needed}"
 
       - name: Download the latest cn.txt
         if: steps.check.outputs.needed == 'true'
@@ -41,34 +45,23 @@ jobs:
         run: ./gfw-pac.py -f gfw.pac -p "PROXY 127.0.0.1:7897" --proxy-domains=proxy-domains.txt --direct-domains=direct-domains.txt --localtld-domains=local-tlds.txt --ip-file=cidrs-cn.txt
 
       - name: Commit and push changes
-        id: commit
         if: steps.check.outputs.needed == 'true'
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add -A
 
+          git add -A
           if git diff --cached --quiet; then
-            echo "generated=false" >> "$GITHUB_OUTPUT"
             echo "工作区无变更，跳过提交"
             exit 0
           fi
 
-          last_msg=$(git log -1 --pretty=%s)   # 只取标题，避免多行
           if [ "${{ github.event_name }}" = "schedule" ]; then
             subject="定期更新数据并生成 gfw.pac"
           else
-            subject="自动生成 gfw.pac: ${last_msg}"
+            subject="自动生成 gfw.pac: $(git log -1 --pretty=%s)"
           fi
 
-          git commit -m "${subject}"
+          git commit -m "$subject"
           git pull --rebase --autostash
           git push
-          echo "generated=true" >> "$GITHUB_OUTPUT"
-
-      - name: Trigger Auto-Release
-        if: steps.check.outputs.needed == 'true' && steps.commit.outputs.generated == 'true'
-        uses: benc-uk/workflow-dispatch@v1
-        with:
-          workflow: '.github/workflows/auto-release.yml'
-          token: ${{ secrets.GITHUB_TOKEN }}
